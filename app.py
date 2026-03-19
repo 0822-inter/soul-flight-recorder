@@ -6,16 +6,26 @@ Soul Flight Recorder (SFR) — Streamlit UI
 from __future__ import annotations
 
 import os
-import time
+import uuid
 
 import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Streamlit Cloud の Secrets にも対応
-if "GROQ_API_KEY" in st.secrets:
-    os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+# Streamlit Cloud の Secrets にも対応（ローカルでは secrets.toml がなくてもOK）
+try:
+    if "GROQ_API_KEY" in st.secrets:
+        os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+except Exception:
+    pass
+
+# ------------------------------------------------------------------ #
+# DB 初期化（起動時1回）
+# ------------------------------------------------------------------ #
+
+from src.db import init_db
+init_db()
 
 # ------------------------------------------------------------------ #
 # ページ設定
@@ -43,15 +53,38 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "indexed" not in st.session_state:
     st.session_state.indexed = False
+# インタビュー用セッションID（ブラウザセッション中は固定）
+if "interview_session_id" not in st.session_state:
+    st.session_state.interview_session_id = str(uuid.uuid4())
+# インタビュー履歴キャッシュ（DB再読み込みを減らすため）
+if "interview_history" not in st.session_state:
+    st.session_state.interview_history = []
+# 手動フェーズ管理（0=ICEBREAK, 1=EXPLORE, 2=PATTERN, 3=FUTURE）
+if "interview_phase_idx" not in st.session_state:
+    st.session_state.interview_phase_idx = 0
+# まとめキャッシュ
+if "interview_summary" not in st.session_state:
+    st.session_state.interview_summary = ""
 
 
 # ------------------------------------------------------------------ #
-# サイドバー：インデックス管理
+# サイドバー
 # ------------------------------------------------------------------ #
 
 with st.sidebar:
-    st.header("📁 データ管理")
+    # ── 言語スイッチ ──
+    lang_display = st.radio(
+        "Language / 言語",
+        options=["日本語", "English"],
+        horizontal=True,
+        key="lang_display",
+    )
+    lang = "ja" if lang_display == "日本語" else "en"
 
+    st.divider()
+
+    # ── API Key ──
+    st.header("🔑 API Key")
     api_key = st.text_input(
         "Groq API Key",
         value=os.environ.get("GROQ_API_KEY", ""),
@@ -63,14 +96,26 @@ with st.sidebar:
 
     st.divider()
 
-    data_dir = st.text_input("データディレクトリ", value="data/raw")
-    force_rebuild = st.checkbox("インデックスを再構築", value=False)
+    # ── データ管理（既存機能） ──
+    st.header("📁 データ管理" if lang == "ja" else "📁 Data")
 
-    if st.button("🔄 インデックス構築 / 更新", use_container_width=True):
+    data_dir = st.text_input(
+        "データディレクトリ" if lang == "ja" else "Data directory",
+        value="data/raw",
+    )
+    force_rebuild = st.checkbox(
+        "インデックスを再構築" if lang == "ja" else "Rebuild index",
+        value=False,
+    )
+
+    if st.button(
+        "🔄 インデックス構築 / 更新" if lang == "ja" else "🔄 Build / Update Index",
+        use_container_width=True,
+    ):
         if not api_key:
-            st.error("Google AI Studio の API Key を入力してください")
+            st.error("Groq API Key を入力してください" if lang == "ja" else "Please enter your Groq API Key")
         else:
-            with st.spinner("データを読み込んでインデックスを構築中..."):
+            with st.spinner("インデックスを構築中..." if lang == "ja" else "Building index..."):
                 from src.vectorstore import build_index
                 from src.analyzer import SFRAnalyzer
 
@@ -81,15 +126,22 @@ with st.sidebar:
                 st.session_state.indexed = True
             st.success(
                 f"完了！ {st.session_state.store.count()} チャンクをインデックス済み"
+                if lang == "ja"
+                else f"Done! {st.session_state.store.count()} chunks indexed"
             )
 
     if st.session_state.indexed:
-        st.info(f"インデックス済み: {st.session_state.store.count()} チャンク")
+        st.info(
+            f"インデックス済み: {st.session_state.store.count()} チャンク"
+            if lang == "ja"
+            else f"Indexed: {st.session_state.store.count()} chunks"
+        )
 
     st.divider()
     st.caption(
-        "📝 `data/raw/` に .txt / .md ファイルを追加して\n"
-        "「インデックス構築」を押すと記憶が増えます"
+        "📝 `data/raw/` に .txt / .md ファイルを追加して\n「インデックス構築」を押すと記憶が増えます"
+        if lang == "ja"
+        else "📝 Add .txt / .md files to `data/raw/`\nthen press Build Index."
     )
 
 
@@ -97,18 +149,179 @@ with st.sidebar:
 # メインエリア：タブ構成
 # ------------------------------------------------------------------ #
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["🔥 強み分析", "📊 感情マップ", "🚀 未来ビジョン", "💬 対話コーチング"]
-)
+if lang == "ja":
+    tab_labels = ["🎤 インタビュー", "🔥 強み分析", "📊 感情マップ", "🚀 未来ビジョン", "💬 対話コーチング"]
+else:
+    tab_labels = ["🎤 Interview", "🔥 Strengths", "📊 Emotion Map", "🚀 Future Vision", "💬 Coaching"]
+
+tab_interview, tab1, tab2, tab3, tab4 = st.tabs(tab_labels)
 
 def _require_index():
     if not st.session_state.indexed:
-        st.warning(
+        msg = (
             "サイドバーで **インデックス構築** を実行してください。\n\n"
             "`data/raw/` にテキストファイルを置き、API Key を入力後にボタンを押します。"
+            if lang == "ja"
+            else "Please run **Build Index** in the sidebar.\n\n"
+            "Add text files to `data/raw/` and click the button after entering your API Key."
         )
+        st.warning(msg)
         return False
     return True
+
+
+# ------------------------------------------------------------------ #
+# Tab 0: インタビュー
+# ------------------------------------------------------------------ #
+
+with tab_interview:
+    from src.db import (
+        create_session, save_message, get_messages,
+        user_turn_count, clear_session_messages,
+    )
+    from src.interview import InterviewEngine, PHASE_LABELS, Phase
+
+    if lang == "ja":
+        st.subheader("🎤 AIインタビュー")
+        st.write("質問に答えていくだけで、あなたの「本当にやりたいこと」が見えてきます。")
+    else:
+        st.subheader("🎤 AI Interview")
+        st.write("Just answer the questions — your true passions and strengths will emerge naturally.")
+
+    session_id = st.session_state.interview_session_id
+    create_session(session_id, lang)
+
+    # DB から履歴取得
+    db_history = get_messages(session_id)
+    st.session_state.interview_history = db_history
+
+    # ── フェーズ（手動管理） ──
+    phases_list = list(Phase)
+    phase_idx = st.session_state.interview_phase_idx
+    current_phase = phases_list[phase_idx]
+    phase_labels = PHASE_LABELS[lang]
+
+    # フェーズインジケーター + 「次のフェーズへ」ボタン
+    indicator_cols = st.columns(len(phases_list) + 1)
+    for i, (col, ph) in enumerate(zip(indicator_cols[:len(phases_list)], phases_list)):
+        label = phase_labels[ph]
+        if i < phase_idx:
+            col.success(label)
+        elif i == phase_idx:
+            col.info(f"**{label}**")
+        else:
+            col.markdown(f"<span style='color:gray'>{label}</span>", unsafe_allow_html=True)
+
+    with indicator_cols[-1]:
+        next_label = "次のフェーズへ →" if lang == "ja" else "Next Phase →"
+        next_disabled = phase_idx >= len(phases_list) - 1
+        if st.button(next_label, disabled=next_disabled, key="btn_next_phase"):
+            st.session_state.interview_phase_idx += 1
+            st.rerun()
+
+    st.divider()
+
+    # ── レイアウト: チャット | まとめ ──
+    chat_col, summary_col = st.columns([3, 2])
+
+    with summary_col:
+        summary_title = "📋 これまでのまとめ" if lang == "ja" else "📋 Summary So Far"
+        st.markdown(f"**{summary_title}**")
+
+        update_label = "まとめを更新" if lang == "ja" else "Update Summary"
+        if st.button(update_label, key="btn_summary", use_container_width=True):
+            if not api_key:
+                st.error("API Key が必要です" if lang == "ja" else "API Key required")
+            elif not st.session_state.interview_history:
+                st.info("まだ会話がありません" if lang == "ja" else "No conversation yet")
+            else:
+                engine = InterviewEngine(api_key=api_key)
+                summary_area = st.empty()
+                full_summary = ""
+                with st.spinner("まとめを生成中..." if lang == "ja" else "Generating summary..."):
+                    for chunk in engine.stream_summary(
+                        history=[{"role": m["role"], "content": m["content"]}
+                                 for m in st.session_state.interview_history],
+                        lang=lang,
+                    ):
+                        full_summary += chunk
+                        summary_area.markdown(full_summary + "▌")
+                summary_area.markdown(full_summary)
+                st.session_state.interview_summary = full_summary
+
+        if st.session_state.interview_summary:
+            st.markdown(st.session_state.interview_summary)
+        else:
+            placeholder_text = (
+                "「まとめを更新」ボタンを押すと、\nここに会話のまとめが表示されます。"
+                if lang == "ja"
+                else "Press 'Update Summary' to see\na summary of your conversation here."
+            )
+            st.caption(placeholder_text)
+
+    with chat_col:
+        # チャット履歴の表示
+        for msg in st.session_state.interview_history:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        # 初回: AIから先に挨拶を出す
+        if len(st.session_state.interview_history) == 0:
+            if not api_key:
+                st.info(
+                    "サイドバーに Groq API Key を入力するとインタビューが始まります。"
+                    if lang == "ja"
+                    else "Enter your Groq API Key in the sidebar to start the interview."
+                )
+            else:
+                engine = InterviewEngine(api_key=api_key)
+                with st.chat_message("assistant"):
+                    response_area = st.empty()
+                    full_response = ""
+                    for chunk in engine.stream_response(history=[], lang=lang, phase=current_phase):
+                        full_response += chunk
+                        response_area.markdown(full_response + "▌")
+                    response_area.markdown(full_response)
+                save_message(session_id, "assistant", full_response, current_phase.value)
+                st.rerun()
+
+        # ユーザー入力
+        placeholder = "ここに答えを入力してください..." if lang == "ja" else "Type your answer here..."
+        if user_input := st.chat_input(placeholder):
+            if not api_key:
+                st.error("Groq API Key を入力してください" if lang == "ja" else "Please enter your Groq API Key")
+            else:
+                save_message(session_id, "user", user_input, current_phase.value)
+                with st.chat_message("user"):
+                    st.markdown(user_input)
+
+                updated_history = get_messages(session_id)
+                engine = InterviewEngine(api_key=api_key)
+                with st.chat_message("assistant"):
+                    response_area = st.empty()
+                    full_response = ""
+                    for chunk in engine.stream_response(
+                        history=[{"role": m["role"], "content": m["content"]} for m in updated_history],
+                        lang=lang,
+                        phase=current_phase,
+                    ):
+                        full_response += chunk
+                        response_area.markdown(full_response + "▌")
+                    response_area.markdown(full_response)
+
+                save_message(session_id, "assistant", full_response, current_phase.value)
+                st.rerun()
+
+        # リセットボタン
+        if st.session_state.interview_history:
+            st.divider()
+            reset_label = "🗑️ インタビューをリセット" if lang == "ja" else "🗑️ Reset Interview"
+            if st.button(reset_label, key="btn_interview_reset"):
+                clear_session_messages(session_id)
+                st.session_state.interview_history = []
+                st.session_state.interview_phase_idx = 0
+                st.session_state.interview_summary = ""
+                st.rerun()
 
 
 # ------------------------------------------------------------------ #
