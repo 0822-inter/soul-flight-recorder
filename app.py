@@ -96,16 +96,7 @@ with st.sidebar:
 
     st.divider()
 
-    # ── API Key ──
-    st.header("🔑 API Key")
-    api_key = st.text_input(
-        "Groq API Key",
-        value=os.environ.get("GROQ_API_KEY", ""),
-        type="password",
-        help=".env ファイルに GROQ_API_KEY=... と書いておくと自動入力されます",
-    )
-    if api_key:
-        os.environ["GROQ_API_KEY"] = api_key
+    api_key = os.environ.get("GROQ_API_KEY", "")
 
     st.divider()
 
