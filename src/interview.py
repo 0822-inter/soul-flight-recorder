@@ -75,9 +75,39 @@ PHASE_GOALS: dict[str, dict[Phase, str]] = {
 # システムプロンプト
 # ------------------------------------------------------------------ #
 
-def _build_system_prompt(phase: Phase, lang: str) -> str:
+def _build_system_prompt(phase: Phase, lang: str, profile: dict | None = None) -> str:
     goal = PHASE_GOALS[lang][phase]
     phase_label = PHASE_LABELS[lang][phase]
+
+    # プロファイルが存在する場合のインジェクション文字列を生成
+    profile_section = ""
+    if profile and any(profile.get(k) for k in ["excitement_triggers", "strengths", "core_values", "future_keywords"]):
+        if lang == "ja":
+            lines = ["【これまでに分かっているユーザーの情報】（積極的に活用して質問を深めること）"]
+            if profile.get("excitement_triggers"):
+                lines.append(f"ワクワクのトリガー: {', '.join(profile['excitement_triggers'])}")
+            if profile.get("strengths"):
+                lines.append(f"強み: {', '.join(profile['strengths'])}")
+            if profile.get("core_values"):
+                lines.append(f"価値観: {', '.join(profile['core_values'])}")
+            if profile.get("avoidance_patterns"):
+                lines.append(f"モヤモヤのパターン: {', '.join(profile['avoidance_patterns'])}")
+            if profile.get("future_keywords"):
+                lines.append(f"将来のキーワード: {', '.join(profile['future_keywords'])}")
+            profile_section = "\n".join(lines) + "\n\n"
+        else:
+            lines = ["【Known User Profile】(Actively use this to deepen your questions)"]
+            if profile.get("excitement_triggers"):
+                lines.append(f"Excitement triggers: {', '.join(profile['excitement_triggers'])}")
+            if profile.get("strengths"):
+                lines.append(f"Strengths: {', '.join(profile['strengths'])}")
+            if profile.get("core_values"):
+                lines.append(f"Core values: {', '.join(profile['core_values'])}")
+            if profile.get("avoidance_patterns"):
+                lines.append(f"Avoidance patterns: {', '.join(profile['avoidance_patterns'])}")
+            if profile.get("future_keywords"):
+                lines.append(f"Future keywords: {', '.join(profile['future_keywords'])}")
+            profile_section = "\n".join(lines) + "\n\n"
 
     if lang == "ja":
         return f"""\
@@ -85,7 +115,7 @@ def _build_system_prompt(phase: Phase, lang: str) -> str:
 ユーザーの過去の経験・感情を通じて、本人も気づいていない
 「本当の関心・強み・行動パターン」を自然に引き出してください。
 
-【現在のフェーズ】{phase_label}
+{profile_section}【現在のフェーズ】{phase_label}
 【このフェーズの目的】{goal}
 
 【インタビューの原則】
@@ -109,7 +139,7 @@ You are an AI interviewer for "Soul Flight Recorder."
 Your role is to naturally draw out the user's hidden interests, strengths,
 and behavioral patterns through exploring their past experiences and emotions.
 
-【Current Phase】{phase_label}
+{profile_section}【Current Phase】{phase_label}
 【Phase Goal】{goal}
 
 【Interview Principles】
@@ -144,16 +174,18 @@ class InterviewEngine:
         history: list[dict],
         lang: str = "ja",
         phase: Phase | None = None,
+        profile: dict | None = None,
     ) -> Generator[str, None, None]:
         """
         history: [{"role": "user"|"assistant", "content": "..."}] の順序付きリスト
         lang: "ja" | "en"
         phase: 明示的に指定する場合。None なら history の turn 数から自動判定
+        profile: プロファイルJSONを注入する場合
         """
         if phase is None:
             user_turns = sum(1 for m in history if m["role"] == "user")
             phase = get_phase(user_turns)
-        system_prompt = _build_system_prompt(phase, lang)
+        system_prompt = _build_system_prompt(phase, lang, profile)
 
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend({"role": m["role"], "content": m["content"]} for m in history)

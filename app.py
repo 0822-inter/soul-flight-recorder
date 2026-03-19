@@ -83,6 +83,19 @@ with st.sidebar:
 
     st.divider()
 
+    # ── ペルソナ選択 ──
+    from src.analyzer import PERSONA_OPTIONS
+    persona_opts = PERSONA_OPTIONS[lang]
+    persona_display = st.selectbox(
+        "モード / Mode" if lang == "ja" else "Mode",
+        options=list(persona_opts.values()),
+        key="persona_display",
+    )
+    # display名 → キーに逆変換
+    persona = next(k for k, v in persona_opts.items() if v == persona_display)
+
+    st.divider()
+
     # ── API Key ──
     st.header("🔑 API Key")
     api_key = st.text_input(
@@ -259,6 +272,39 @@ with tab_interview:
             )
             st.caption(placeholder_text)
 
+        # プロファイルJSON表示
+        from src.db import get_profile
+        current_profile = get_profile(session_id)
+        if current_profile and any(current_profile.get(k) for k in ["excitement_triggers", "strengths"]):
+            profile_label = "🧬 自動生成プロファイル" if lang == "ja" else "🧬 Auto Profile"
+            with st.expander(profile_label, expanded=False):
+                if lang == "ja":
+                    field_labels = {
+                        "excitement_triggers": "ワクワクのトリガー",
+                        "strengths": "強み",
+                        "core_values": "価値観",
+                        "avoidance_patterns": "モヤモヤのパターン",
+                        "future_keywords": "将来のキーワード",
+                        "confidence_score": "確信度",
+                    }
+                else:
+                    field_labels = {
+                        "excitement_triggers": "Excitement Triggers",
+                        "strengths": "Strengths",
+                        "core_values": "Core Values",
+                        "avoidance_patterns": "Avoidance Patterns",
+                        "future_keywords": "Future Keywords",
+                        "confidence_score": "Confidence Score",
+                    }
+                for key, label in field_labels.items():
+                    val = current_profile.get(key)
+                    if key == "confidence_score":
+                        st.progress(float(val or 0), text=f"{label}: {val}")
+                    elif val:
+                        st.markdown(f"**{label}**")
+                        for item in val:
+                            st.markdown(f"- {item}")
+
     with chat_col:
         # チャット履歴の表示
         for msg in st.session_state.interview_history:
@@ -296,6 +342,25 @@ with tab_interview:
                     st.markdown(user_input)
 
                 updated_history = get_messages(session_id)
+                current_user_turns = user_turn_count(session_id)
+
+                # ── バックグラウンドプロファイル更新（5ターンごと）──
+                from src.profile_builder import ProfileBuilder, should_update
+                from src.db import get_profile, update_profile
+                if should_update(current_user_turns):
+                    profile_builder = ProfileBuilder(api_key=api_key)
+                    existing = get_profile(session_id)
+                    new_profile = profile_builder.update(
+                        history=[{"role": m["role"], "content": m["content"]} for m in updated_history],
+                        existing_profile=existing,
+                        lang=lang,
+                    )
+                    update_profile(session_id, new_profile)
+                    current_profile = new_profile
+                else:
+                    from src.db import get_profile
+                    current_profile = get_profile(session_id)
+
                 engine = InterviewEngine(api_key=api_key)
                 with st.chat_message("assistant"):
                     response_area = st.empty()
@@ -304,6 +369,7 @@ with tab_interview:
                         history=[{"role": m["role"], "content": m["content"]} for m in updated_history],
                         lang=lang,
                         phase=current_phase,
+                        profile=current_profile if current_profile else None,
                     ):
                         full_response += chunk
                         response_area.markdown(full_response + "▌")
@@ -325,21 +391,70 @@ with tab_interview:
 
 
 # ------------------------------------------------------------------ #
+# Tab 1〜4 共通: プロファイル取得 + アナライザー準備
+# ------------------------------------------------------------------ #
+
+from src.db import get_profile as _get_profile
+from src.analyzer import SFRAnalyzer
+
+_session_profile = _get_profile(st.session_state.interview_session_id)
+
+# インデックスがなくてもプロファイルがあれば動作可能
+def _get_analyzer() -> SFRAnalyzer:
+    if st.session_state.indexed and st.session_state.analyzer:
+        # 既存analyzerにapi_keyを補完
+        st.session_state.analyzer._api_key = api_key
+        st.session_state.analyzer._client = None
+        return st.session_state.analyzer
+    return SFRAnalyzer(store=None, api_key=api_key)
+
+def _has_data() -> bool:
+    """RAGインデックスまたはプロファイルのどちらかがあれば True"""
+    has_index = st.session_state.indexed
+    has_profile = bool(_session_profile and any(
+        _session_profile.get(k) for k in ["strengths", "excitement_triggers"]
+    ))
+    return has_index or has_profile
+
+def _require_data():
+    if not _has_data():
+        if lang == "ja":
+            st.warning(
+                "まず **🎤 インタビュー** タブで会話するか、\n"
+                "サイドバーで **インデックス構築** を実行してください。"
+            )
+        else:
+            st.warning(
+                "Please complete some **🎤 Interview** conversation first,\n"
+                "or run **Build Index** in the sidebar."
+            )
+        return False
+    return True
+
+
+# ------------------------------------------------------------------ #
 # Tab 1: 強み・関心の抽出
 # ------------------------------------------------------------------ #
 
 with tab1:
-    st.subheader("🔥 強み・関心の抽出")
-    st.write(
-        "過去の経験記録から「ワクワクのパターン」と「潜在的な強み」を抽出します。"
-    )
+    if lang == "ja":
+        st.subheader("🔥 強み・関心の抽出")
+        st.write("インタビューの記録とテキストファイルを統合して、強みとワクワクのパターンを抽出します。")
+        btn_label, spinner_label = "分析スタート", "分析中..."
+    else:
+        st.subheader("🔥 Strengths & Interests")
+        st.write("Combines interview profile and text records to extract strengths and excitement patterns.")
+        btn_label, spinner_label = "Start Analysis", "Analyzing..."
 
-    if st.button("分析スタート", key="btn_strength", use_container_width=True):
-        if _require_index():
+    if st.button(btn_label, key="btn_strength", use_container_width=True):
+        if _require_data():
+            analyzer = _get_analyzer()
             result_area = st.empty()
             full_text = ""
-            with st.spinner("Claude が分析中..."):
-                for chunk in st.session_state.analyzer.extract_strengths_stream():
+            with st.spinner(spinner_label):
+                for chunk in analyzer.extract_strengths_stream(
+                    profile=_session_profile, lang=lang, persona=persona
+                ):
                     full_text += chunk
                     result_area.markdown(full_text + "▌")
             result_area.markdown(full_text)
@@ -350,17 +465,24 @@ with tab1:
 # ------------------------------------------------------------------ #
 
 with tab2:
-    st.subheader("📊 感情マッピング")
-    st.write(
-        "各活動での没頭度・ワクワク度・達成感・モヤモヤ度を分析します。"
-    )
+    if lang == "ja":
+        st.subheader("📊 感情マッピング")
+        st.write("各活動での没頭度・ワクワク度・達成感・モヤモヤ度を分析します。")
+        btn_label, spinner_label = "感情マップを生成", "感情パターンを解析中..."
+    else:
+        st.subheader("📊 Emotion Map")
+        st.write("Analyzes immersion, excitement, fulfillment, and discomfort across activities.")
+        btn_label, spinner_label = "Generate Emotion Map", "Analyzing emotion patterns..."
 
-    if st.button("感情マップを生成", key="btn_emotion", use_container_width=True):
-        if _require_index():
+    if st.button(btn_label, key="btn_emotion", use_container_width=True):
+        if _require_data():
+            analyzer = _get_analyzer()
             result_area = st.empty()
             full_text = ""
-            with st.spinner("感情パターンを解析中..."):
-                for chunk in st.session_state.analyzer.analyze_emotion_timeline_stream():
+            with st.spinner(spinner_label):
+                for chunk in analyzer.analyze_emotion_timeline_stream(
+                    profile=_session_profile, lang=lang, persona=persona
+                ):
                     full_text += chunk
                     result_area.markdown(full_text + "▌")
             result_area.markdown(full_text)
@@ -371,75 +493,78 @@ with tab2:
 # ------------------------------------------------------------------ #
 
 with tab3:
-    st.subheader("🚀 等身大の未来予想図")
-    st.write(
-        "強みと関心を統合した「5年後のビジョン」と「最初の一歩」を描きます。"
-    )
+    if lang == "ja":
+        st.subheader("🚀 等身大の未来予想図")
+        st.write("強みと関心を統合した「5年後のビジョン」と「最初の一歩」を描きます。")
+        btn_label, spinner_label = "ビジョンを生成", "未来像を描いています..."
+    else:
+        st.subheader("🚀 Future Vision")
+        st.write("Paints a realistic 5-year vision and concrete first steps based on your strengths and interests.")
+        btn_label, spinner_label = "Generate Vision", "Painting your future..."
 
-    if st.button("ビジョンを生成", key="btn_vision", use_container_width=True):
-        if _require_index():
+    if st.button(btn_label, key="btn_vision", use_container_width=True):
+        if _require_data():
+            analyzer = _get_analyzer()
             result_area = st.empty()
             full_text = ""
-            with st.spinner("未来像を描いています..."):
-                for chunk in st.session_state.analyzer.generate_future_vision_stream():
+            with st.spinner(spinner_label):
+                for chunk in analyzer.generate_future_vision_stream(
+                    profile=_session_profile, lang=lang, persona=persona
+                ):
                     full_text += chunk
                     result_area.markdown(full_text + "▌")
             result_area.markdown(full_text)
 
 
 # ------------------------------------------------------------------ #
-# Tab 4: 対話コーチング（マルチターン RAG チャット）
+# Tab 4: 対話コーチング
 # ------------------------------------------------------------------ #
 
 with tab4:
-    st.subheader("💬 自己理解コーチング")
-    st.write(
-        "過去の記録を参照しながら、あなたの問いに答えます。\n"
-        "「自分の強みって何？」「なぜあの活動が楽しかったの？」など自由に聞いてみてください。"
-    )
+    if lang == "ja":
+        st.subheader("💬 自己理解コーチング")
+        st.write("インタビュー記録とテキストファイルを参照しながら、あなたの問いに答えます。")
+        chat_placeholder = "何でも聞いてみてください..."
+        reset_label = "🗑️ 会話をリセット"
+    else:
+        st.subheader("💬 Coaching Chat")
+        st.write("Answers your questions using interview records and text files as reference.")
+        chat_placeholder = "Ask me anything..."
+        reset_label = "🗑️ Reset Chat"
 
-    # チャット履歴の表示
     for msg in st.session_state.chat_history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # ユーザー入力
-    if prompt := st.chat_input("何でも聞いてみてください..."):
-        if not _require_index():
-            pass
-        elif not api_key:
-            st.error("API Key を入力してください")
+    if prompt := st.chat_input(chat_placeholder):
+        if not api_key:
+            st.error("Groq API Key を入力してください" if lang == "ja" else "Please enter your Groq API Key")
+        elif not _has_data():
+            _require_data()
         else:
-            # ユーザーメッセージ表示
             with st.chat_message("user"):
                 st.markdown(prompt)
 
-            # AI 応答（ストリーミング）
+            analyzer = _get_analyzer()
             with st.chat_message("assistant"):
                 response_area = st.empty()
                 full_response = ""
-
-                for chunk in st.session_state.analyzer.chat_stream(
+                for chunk in analyzer.chat_stream(
                     user_input=prompt,
-                    history=[
-                        {"role": m["role"], "content": m["content"]}
-                        for m in st.session_state.chat_history
-                    ],
+                    history=[{"role": m["role"], "content": m["content"]}
+                             for m in st.session_state.chat_history],
+                    profile=_session_profile,
+                    lang=lang,
+                    persona=persona,
                 ):
                     full_response += chunk
                     response_area.markdown(full_response + "▌")
-
                 response_area.markdown(full_response)
 
-            # 履歴に追加
-            st.session_state.chat_history.append(
-                {"role": "user", "content": prompt}
-            )
-            st.session_state.chat_history.append(
-                {"role": "assistant", "content": full_response}
-            )
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            st.session_state.chat_history.append({"role": "assistant", "content": full_response})
 
     if st.session_state.chat_history:
-        if st.button("🗑️ 会話をリセット", key="btn_reset"):
+        if st.button(reset_label, key="btn_reset"):
             st.session_state.chat_history = []
             st.rerun()
