@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import uuid
 
+import groq as groq_module
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -65,6 +66,12 @@ if "interview_phase_idx" not in st.session_state:
 # まとめキャッシュ
 if "interview_summary" not in st.session_state:
     st.session_state.interview_summary = ""
+# APIキー（BYOKモード）
+if "groq_api_key" not in st.session_state:
+    st.session_state.groq_api_key = os.environ.get("GROQ_API_KEY", "")
+# 言語変更検出
+if "lang_prev" not in st.session_state:
+    st.session_state.lang_prev = None
 
 
 # ------------------------------------------------------------------ #
@@ -96,7 +103,45 @@ with st.sidebar:
 
     st.divider()
 
-    api_key = os.environ.get("GROQ_API_KEY", "")
+    # ── API Key (BYOK) ──
+    st.markdown("🔑 **Groq API Key**")
+    api_key = st.text_input(
+        "Groq API Key",
+        value=st.session_state.groq_api_key,
+        type="password",
+        placeholder="gsk_...",
+        label_visibility="collapsed",
+        help=(
+            "console.groq.com で無料取得できます"
+            if lang == "ja"
+            else "Get your free key at console.groq.com"
+        ),
+    )
+    st.session_state.groq_api_key = api_key
+    if not api_key:
+        st.caption(
+            "⚠️ APIキーを入力するとインタビューが開始されます"
+            if lang == "ja"
+            else "⚠️ Enter API key to start the interview"
+        )
+
+    st.divider()
+
+    # ── トークンモード ──
+    eco_options = ["通常", "節約 (Eco)"] if lang == "ja" else ["Normal", "Eco"]
+    eco_selection = st.radio(
+        "トークンモード" if lang == "ja" else "Token Mode",
+        options=eco_options,
+        horizontal=True,
+        key="eco_mode_radio",
+    )
+    eco_mode = eco_selection in ("節約 (Eco)", "Eco")
+    if eco_mode:
+        st.caption(
+            "直近3往復 ＋ 要約メモのみ送信（低消費）"
+            if lang == "ja"
+            else "Sends last 3 exchanges + summary memo (saves tokens)"
+        )
 
     st.divider()
 
@@ -147,6 +192,40 @@ with st.sidebar:
         if lang == "ja"
         else "📝 Add .txt / .md files to `data/raw/`\nthen press Build Index."
     )
+
+
+# ── 言語変更でインタビューセッションをリセット ──
+if st.session_state.lang_prev is not None and st.session_state.lang_prev != lang:
+    st.session_state.interview_session_id = str(uuid.uuid4())
+    st.session_state.interview_history = []
+    st.session_state.interview_phase_idx = 0
+    st.session_state.interview_summary = ""
+st.session_state.lang_prev = lang
+
+
+# ------------------------------------------------------------------ #
+# エラーハンドリングヘルパー
+# ------------------------------------------------------------------ #
+
+def _api_error_warning(e: Exception, lang: str) -> None:
+    if isinstance(e, groq_module.AuthenticationError):
+        st.warning(
+            "APIキーが無効です。正しいGroq APIキーを入力してください。"
+            if lang == "ja"
+            else "Invalid API key. Please enter a valid Groq API key."
+        )
+    elif isinstance(e, groq_module.RateLimitError):
+        st.warning(
+            "レート制限に達しました。しばらく待ってから再試行してください。"
+            if lang == "ja"
+            else "Rate limit reached. Please wait a moment and try again."
+        )
+    else:
+        st.warning(
+            f"APIエラーが発生しました: {e}"
+            if lang == "ja"
+            else f"API error occurred: {e}"
+        )
 
 
 # ------------------------------------------------------------------ #
@@ -242,16 +321,20 @@ with tab_interview:
                 engine = InterviewEngine(api_key=api_key)
                 summary_area = st.empty()
                 full_summary = ""
-                with st.spinner("まとめを生成中..." if lang == "ja" else "Generating summary..."):
-                    for chunk in engine.stream_summary(
-                        history=[{"role": m["role"], "content": m["content"]}
-                                 for m in st.session_state.interview_history],
-                        lang=lang,
-                    ):
-                        full_summary += chunk
-                        summary_area.markdown(full_summary + "▌")
-                summary_area.markdown(full_summary)
-                st.session_state.interview_summary = full_summary
+                try:
+                    with st.spinner("まとめを生成中..." if lang == "ja" else "Generating summary..."):
+                        for chunk in engine.stream_summary(
+                            history=[{"role": m["role"], "content": m["content"]}
+                                     for m in st.session_state.interview_history],
+                            lang=lang,
+                        ):
+                            full_summary += chunk
+                            summary_area.markdown(full_summary + "▌")
+                    summary_area.markdown(full_summary)
+                    st.session_state.interview_summary = full_summary
+                except Exception as e:
+                    summary_area.empty()
+                    _api_error_warning(e, lang)
 
         if st.session_state.interview_summary:
             st.markdown(st.session_state.interview_summary)
@@ -312,15 +395,18 @@ with tab_interview:
                 )
             else:
                 engine = InterviewEngine(api_key=api_key)
-                with st.chat_message("assistant"):
-                    response_area = st.empty()
-                    full_response = ""
-                    for chunk in engine.stream_response(history=[], lang=lang, phase=current_phase):
-                        full_response += chunk
-                        response_area.markdown(full_response + "▌")
-                    response_area.markdown(full_response)
-                save_message(session_id, "assistant", full_response, current_phase.value)
-                st.rerun()
+                try:
+                    with st.chat_message("assistant"):
+                        response_area = st.empty()
+                        full_response = ""
+                        for chunk in engine.stream_response(history=[], lang=lang, phase=current_phase):
+                            full_response += chunk
+                            response_area.markdown(full_response + "▌")
+                        response_area.markdown(full_response)
+                    save_message(session_id, "assistant", full_response, current_phase.value)
+                    st.rerun()
+                except Exception as e:
+                    _api_error_warning(e, lang)
 
         # ユーザー入力
         placeholder = "ここに答えを入力してください..." if lang == "ja" else "Type your answer here..."
@@ -352,22 +438,36 @@ with tab_interview:
                     from src.db import get_profile
                     current_profile = get_profile(session_id)
 
-                engine = InterviewEngine(api_key=api_key)
-                with st.chat_message("assistant"):
-                    response_area = st.empty()
-                    full_response = ""
-                    for chunk in engine.stream_response(
-                        history=[{"role": m["role"], "content": m["content"]} for m in updated_history],
-                        lang=lang,
-                        phase=current_phase,
-                        profile=current_profile if current_profile else None,
-                    ):
-                        full_response += chunk
-                        response_area.markdown(full_response + "▌")
-                    response_area.markdown(full_response)
+                # ── Eco モード: 送信履歴を削減 ──
+                raw_history = [{"role": m["role"], "content": m["content"]} for m in updated_history]
+                if eco_mode and len(raw_history) > 6:
+                    send_history = raw_history[-6:]
+                    context_memo = st.session_state.interview_summary or None
+                else:
+                    send_history = raw_history
+                    context_memo = None
 
-                save_message(session_id, "assistant", full_response, current_phase.value)
-                st.rerun()
+                engine = InterviewEngine(api_key=api_key)
+                full_response = ""
+                try:
+                    with st.chat_message("assistant"):
+                        response_area = st.empty()
+                        for chunk in engine.stream_response(
+                            history=send_history,
+                            lang=lang,
+                            phase=current_phase,
+                            profile=current_profile if current_profile else None,
+                            context_memo=context_memo,
+                        ):
+                            full_response += chunk
+                            response_area.markdown(full_response + "▌")
+                        response_area.markdown(full_response)
+                except Exception as e:
+                    _api_error_warning(e, lang)
+
+                if full_response:
+                    save_message(session_id, "assistant", full_response, current_phase.value)
+                    st.rerun()
 
         # リセットボタン
         if st.session_state.interview_history:
@@ -442,13 +542,17 @@ with tab1:
             analyzer = _get_analyzer()
             result_area = st.empty()
             full_text = ""
-            with st.spinner(spinner_label):
-                for chunk in analyzer.extract_strengths_stream(
-                    profile=_session_profile, lang=lang, persona=persona
-                ):
-                    full_text += chunk
-                    result_area.markdown(full_text + "▌")
-            result_area.markdown(full_text)
+            try:
+                with st.spinner(spinner_label):
+                    for chunk in analyzer.extract_strengths_stream(
+                        profile=_session_profile, lang=lang, persona=persona
+                    ):
+                        full_text += chunk
+                        result_area.markdown(full_text + "▌")
+                result_area.markdown(full_text)
+            except Exception as e:
+                result_area.empty()
+                _api_error_warning(e, lang)
 
 
 # ------------------------------------------------------------------ #
@@ -470,13 +574,17 @@ with tab2:
             analyzer = _get_analyzer()
             result_area = st.empty()
             full_text = ""
-            with st.spinner(spinner_label):
-                for chunk in analyzer.analyze_emotion_timeline_stream(
-                    profile=_session_profile, lang=lang, persona=persona
-                ):
-                    full_text += chunk
-                    result_area.markdown(full_text + "▌")
-            result_area.markdown(full_text)
+            try:
+                with st.spinner(spinner_label):
+                    for chunk in analyzer.analyze_emotion_timeline_stream(
+                        profile=_session_profile, lang=lang, persona=persona
+                    ):
+                        full_text += chunk
+                        result_area.markdown(full_text + "▌")
+                result_area.markdown(full_text)
+            except Exception as e:
+                result_area.empty()
+                _api_error_warning(e, lang)
 
 
 # ------------------------------------------------------------------ #
@@ -498,13 +606,17 @@ with tab3:
             analyzer = _get_analyzer()
             result_area = st.empty()
             full_text = ""
-            with st.spinner(spinner_label):
-                for chunk in analyzer.generate_future_vision_stream(
-                    profile=_session_profile, lang=lang, persona=persona
-                ):
-                    full_text += chunk
-                    result_area.markdown(full_text + "▌")
-            result_area.markdown(full_text)
+            try:
+                with st.spinner(spinner_label):
+                    for chunk in analyzer.generate_future_vision_stream(
+                        profile=_session_profile, lang=lang, persona=persona
+                    ):
+                        full_text += chunk
+                        result_area.markdown(full_text + "▌")
+                result_area.markdown(full_text)
+            except Exception as e:
+                result_area.empty()
+                _api_error_warning(e, lang)
 
 
 # ------------------------------------------------------------------ #
@@ -537,23 +649,27 @@ with tab4:
                 st.markdown(prompt)
 
             analyzer = _get_analyzer()
-            with st.chat_message("assistant"):
-                response_area = st.empty()
-                full_response = ""
-                for chunk in analyzer.chat_stream(
-                    user_input=prompt,
-                    history=[{"role": m["role"], "content": m["content"]}
-                             for m in st.session_state.chat_history],
-                    profile=_session_profile,
-                    lang=lang,
-                    persona=persona,
-                ):
-                    full_response += chunk
-                    response_area.markdown(full_response + "▌")
-                response_area.markdown(full_response)
+            full_response = ""
+            try:
+                with st.chat_message("assistant"):
+                    response_area = st.empty()
+                    for chunk in analyzer.chat_stream(
+                        user_input=prompt,
+                        history=[{"role": m["role"], "content": m["content"]}
+                                 for m in st.session_state.chat_history],
+                        profile=_session_profile,
+                        lang=lang,
+                        persona=persona,
+                    ):
+                        full_response += chunk
+                        response_area.markdown(full_response + "▌")
+                    response_area.markdown(full_response)
+            except Exception as e:
+                _api_error_warning(e, lang)
 
-            st.session_state.chat_history.append({"role": "user", "content": prompt})
-            st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+            if full_response:
+                st.session_state.chat_history.append({"role": "user", "content": prompt})
+                st.session_state.chat_history.append({"role": "assistant", "content": full_response})
 
     if st.session_state.chat_history:
         if st.button(reset_label, key="btn_reset"):

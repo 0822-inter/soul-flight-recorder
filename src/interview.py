@@ -175,12 +175,14 @@ class InterviewEngine:
         lang: str = "ja",
         phase: Phase | None = None,
         profile: dict | None = None,
+        context_memo: str | None = None,
     ) -> Generator[str, None, None]:
         """
         history: [{"role": "user"|"assistant", "content": "..."}] の順序付きリスト
         lang: "ja" | "en"
         phase: 明示的に指定する場合。None なら history の turn 数から自動判定
         profile: プロファイルJSONを注入する場合
+        context_memo: Eco モード時に注入する過去会話の要約メモ
         """
         if phase is None:
             user_turns = sum(1 for m in history if m["role"] == "user")
@@ -188,6 +190,16 @@ class InterviewEngine:
         system_prompt = _build_system_prompt(phase, lang, profile)
 
         messages = [{"role": "system", "content": system_prompt}]
+        if context_memo:
+            memo_label = (
+                "【これまでの会話の要約（Ecoモードによる省略）】"
+                if lang == "ja"
+                else "[Summary of earlier conversation (Eco mode)]"
+            )
+            messages.append({
+                "role": "system",
+                "content": f"{memo_label}\n{context_memo}",
+            })
         messages.extend({"role": m["role"], "content": m["content"]} for m in history)
 
         stream = self.client.chat.completions.create(
